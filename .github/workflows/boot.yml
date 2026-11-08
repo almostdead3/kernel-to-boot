@@ -1,0 +1,77 @@
+name: Kernel to Boot
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-boot:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup environment
+        run: |
+          echo "KERNEL_SOURCE=$(cat config.env | grep -w "KERNEL_SOURCE" | head -n 1 | cut -d "=" -f 2)" >> $GITHUB_ENV
+          echo "KERNEL_BRANCH=$(cat config.env | grep -w "KERNEL_BRANCH" | head -n 1 | cut -d "=" -f 2)" >> $GITHUB_ENV
+          echo "KERNEL_DEFCONFIG=$(cat config.env | grep -w "KERNEL_DEFCONFIG" | head -n 1 | cut -d "=" -f 2)" >> $GITHUB_ENV
+          echo "ENVIRONMENT_VARIABLES=$(cat config.env | grep -w "ENVIRONMENT_VARIABLES" | head -n 1 | cut -d ":" -f 2)" >> $GITHUB_ENV
+
+      - name: Set swap to 10G
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 10
+
+      - name: Download toolchain
+        run: |
+          mkdir aarch64-linux-android-4.9 && curl https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-10.0.0_r47.tar.gz -RLO && tar -C aarch64-linux-android-4.9/ -xf android-10.0.0_r47.tar.gz
+          mkdir arm-linux-androideabi-4.9 && curl https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-10.0.0_r47.tar.gz -RLO && tar -C arm-linux-androideabi-4.9/ -xf android-10.0.0_r47.tar.gz
+          mkdir clang && curl https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/10294827a5086a132eaaaaf3db10c7e5e7509583/clang-r428724.tar.gz -RLO && tar -C clang/ -xf clang-*.tar.gz
+
+      - name: Clone kernel source
+        run: |
+          git clone --depth=1 ${{ env.KERNEL_SOURCE }} -b ${{ env.KERNEL_BRANCH }} kernel
+
+      - name: Setup KernelSU
+        run: |
+          cd $GITHUB_WORKSPACE/kernel
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
+          KSU_VERSION=$(cd KernelSU && expr $(/usr/bin/git rev-list --count HEAD) + 10200)
+          echo "UPLOADNAME=-KernelSU_$KSU_VERSION" >> $GITHUB_ENV
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libssl-dev libelf-dev cpio python3 python-is-python3
+
+      - name: Build kernel
+        run: |
+          export KBUILD_BUILD_HOST=Github-Action
+          export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
+          export LD_LIBRARY_PATH=$GITHUB_WORKSPACE/clang/lib64:$LD_LIBRARY_PATH
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$GITHUB_WORKSPACE/aarch64-linux-android-4.9/bin:$GITHUB_WORKSPACE/arm-linux-androideabi-4.9/bin:$PATH
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=$GITHUB_WORKSPACE/aarch64-linux-android-4.9/bin/aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/arm-linux-androideabi-4.9/bin/arm-linux-androideabi-
+          cd kernel
+          rm -rf out
+          mkdir -p out
+          make O=out clean
+          make O=out mrproper
+          make O=out ${{ env.ENVIRONMENT_VARIABLES }} ${{ env.KERNEL_DEFCONFIG }}
+          make O=out ${{ env.ENVIRONMENT_VARIABLES }} -j$(nproc --all)
+
+      - name: Build boot.img
+        run: |
+          KERNEL_IMAGE=$GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image.gz-dtb
+          test -f "$KERNEL_IMAGE"
+          git clone --depth=1 https://android.googlesource.com/platform/system/tools/mkbootimg mkbootimg
+          python3 mkbootimg/unpack_bootimg.py --boot_img boot_stock.img --out unpacked --format=mkbootimg > mkbootimg_args.txt
+          sed -i "s#--kernel [^ ]*#--kernel $KERNEL_IMAGE#" mkbootimg_args.txt
+          eval python3 mkbootimg/mkbootimg.py $(cat mkbootimg_args.txt) -o boot.img
+
+      - name: Upload boot.img
+        uses: actions/upload-artifact@v6
+        with:
+          name: boot-img-${{ github.run_number }}
+          path: boot.img
