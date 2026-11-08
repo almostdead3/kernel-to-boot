@@ -3,6 +3,9 @@ name: Kernel to Boot
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-boot:
     runs-on: ubuntu-24.04
@@ -70,8 +73,8 @@ jobs:
           sed -i "s#--kernel [^ ]*#--kernel $KERNEL_IMAGE#" mkbootimg_args.txt
           eval python3 mkbootimg/mkbootimg.py $(cat mkbootimg_args.txt) -o boot.img
 
-      - name: Upload boot.img
-        uses: actions/upload-artifact@v6
-        with:
-          name: boot-img-${{ github.run_number }}
-          path: boot.img
+      - name: Upload boot.img to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "build-${{ github.run_number }}" boot.img --title "Kernel build ${{ github.run_number }}" --notes "Built from ${{ env.KERNEL_SOURCE }} (${{ env.KERNEL_BRANCH }})"
